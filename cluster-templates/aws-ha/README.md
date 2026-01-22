@@ -2,6 +2,34 @@
 
 This template provisions a highly available OpenShift cluster on AWS with 3 control plane nodes and customizable worker nodes.
 
+## ⚠️ CRITICAL: ArgoCD Configuration Requirement
+
+**If using ArgoCD for cluster provisioning, you MUST configure `ignoreDifferences` correctly to prevent cluster deletion failures.**
+
+Hive creates critical secrets during provisioning (`metadata-json`, `admin-kubeconfig`, `admin-password`) and references them in the ClusterDeployment's `spec.clusterMetadata` section. If ArgoCD's selfHeal doesn't ignore this entire section, **it will delete these secrets**, causing deprovisioning to fail.
+
+### Required ArgoCD Application Configuration
+
+```yaml
+spec:
+  ignoreDifferences:
+    - group: hive.openshift.io
+      kind: ClusterDeployment
+      jsonPointers:
+        - /status
+        - /spec/clusterMetadata  # CRITICAL: Must ignore entire section
+        - /spec/installed  # Also ignore installed timestamp
+    - group: cluster.open-cluster-management.io
+      kind: ManagedCluster
+      jsonPointers:
+        - /status
+        - /spec/managedClusterClientConfigs
+```
+
+**WARNING**: Do NOT use partial paths like `/spec/clusterMetadata/clusterID` - this will NOT prevent the secret deletion issue.
+
+See the [main README troubleshooting section](../../README.md) for more details.
+
 ## Architecture
 
 - **Control Plane**: 3 nodes across 3 availability zones
