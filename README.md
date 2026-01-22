@@ -135,29 +135,36 @@ Update the `repoURL` fields in:
 
 Create required secrets for cluster provisioning. See [secrets/README.md](secrets/README.md) for detailed instructions.
 
+**IMPORTANT**: These secrets must be created in the cluster namespace BEFORE ArgoCD syncs the cluster resources, or recreated if the namespace gets deleted during sync operations.
+
 ```bash
 # Example: Create secrets for dev-cluster-01
+
+# 1. Create namespace (ArgoCD can also create this, but creating it manually ensures secrets persist)
 oc create namespace dev-cluster-01
 
-# AWS credentials
+# 2. AWS credentials
 oc create secret generic aws-credentials \
-  --from-literal=aws_access_key_id=YOUR_KEY \
-  --from-literal=aws_secret_access_key=YOUR_SECRET \
+  --from-literal=aws_access_key_id=YOUR_AWS_ACCESS_KEY \
+  --from-literal=aws_secret_access_key=YOUR_AWS_SECRET_KEY \
   -n dev-cluster-01
 
-# Pull secret (download from console.redhat.com)
+# 3. Pull secret (download from console.redhat.com)
 oc create secret generic pull-secret \
   --from-file=.dockerconfigjson=pull-secret.json \
   --type=kubernetes.io/dockerconfigjson \
   -n dev-cluster-01
 
-# SSH key
+# 4. SSH key (generate new or use existing)
 ssh-keygen -t rsa -b 4096 -f dev-cluster-01-ssh-key -N ""
 oc create secret generic dev-cluster-01-ssh-key \
   --from-file=ssh-privatekey=dev-cluster-01-ssh-key \
   --from-file=ssh-publickey=dev-cluster-01-ssh-key.pub \
+  --type=kubernetes.io/ssh-auth \
   -n dev-cluster-01
 ```
+
+**Note**: Hive automatically injects `pullSecret` and `sshKey` into the install-config from the ClusterDeployment's secret references. Do not add them manually to the install-config.yaml.
 
 ### 4. Deploy ArgoCD project
 
@@ -180,17 +187,25 @@ The cluster will be automatically provisioned when ArgoCD syncs. Monitor the pro
 # Watch ClusterDeployment status
 oc get clusterdeployment -n dev-cluster-01 -w
 
-# Check Hive provision job
-oc get jobs -n dev-cluster-01
+# Check ClusterProvision resource
+oc get clusterprovision -n dev-cluster-01
 
 # View detailed status
 oc describe clusterdeployment dev-cluster-01 -n dev-cluster-01
 
-# Monitor provisioning logs
-oc logs -n dev-cluster-01 -l hive.openshift.io/cluster-deployment-name=dev-cluster-01 -f
+# Monitor provisioning pod logs (find pod name first)
+oc get pods -n dev-cluster-01 | grep provision
+oc logs -f <provision-pod-name> -n dev-cluster-01
 ```
 
 Provisioning typically takes 30-45 minutes.
+
+**Key Status Indicators:**
+- `PROVISIONSTATUS: Provisioning` - Cluster is being created
+- `PROVISIONSTATUS: Provisioned` - Cluster is ready
+- `INFRAID` is populated - AWS resources are being created
+- Provision pod is `Running` - Installation in progress
+- Provision pod shows `Error` - Check logs for specific errors
 
 ### 6. Access the provisioned cluster
 
@@ -204,6 +219,102 @@ oc extract secret/dev-cluster-01-admin-kubeconfig -n dev-cluster-01 --to=. --con
 # Use the kubeconfig
 export KUBECONFIG=./kubeconfig
 oc get nodes
+```
+
+## Important Operational Notes
+
+### Namespace Management
+
+**ArgoCD may delete and recreate namespaces during sync operations**, especially if sync fails. This will delete all secrets in the namespace. To avoid issues:
+
+1. **Create the namespace manually first** before triggering ArgoCD sync
+2. **Keep secret files** (pull-secret.json, SSH keys, AWS credentials) accessible to recreate them if needed
+3. **Cancel stuck sync operations** if the namespace keeps getting deleted:
+   ```bash
+   oc patch application <cluster-name> -n openshift-gitops --type merge -p '{"operation":null}'
+   ```
+
+### ArgoCD RBAC Requirements
+
+The ArgoCD application controller needs cluster-admin permissions to create Hive and ACM resources. This is configured in the bootstrap via:
+
+```bash
+# This ClusterRoleBinding is required for cluster provisioning
+oc create clusterrolebinding openshift-gitops-cluster-admin \
+  --clusterrole=cluster-admin \
+  --serviceaccount=openshift-gitops:openshift-gitops-argocd-application-controller
+```
+
+### OpenShift Version Selection
+
+Check available ClusterImageSets on your hub cluster:
+
+```bash
+oc get clusterimageset
+```
+
+The hub cluster must have ClusterImageSets for the OpenShift versions you want to deploy. Update your cluster configuration to use an available version:
+
+```yaml
+# In cluster-config.yaml
+openshiftVersion: img4.20.10-x86-64-appsub  # Use actual ClusterImageSet name
+```
+
+### Secret Recreation After Namespace Deletion
+
+If the namespace was deleted during ArgoCD sync, you must recreate secrets:
+
+```bash
+# 1. Wait for namespace to be stable
+oc create namespace dev-cluster-01 2>/dev/null || echo "Namespace exists"
+
+# 2. Recreate AWS credentials
+oc create secret generic aws-credentials \
+  --from-literal=aws_access_key_id=YOUR_KEY \
+  --from-literal=aws_secret_access_key=YOUR_SECRET \
+  -n dev-cluster-01
+
+# 3. Recreate pull-secret
+oc create secret generic pull-secret \
+  --from-file=.dockerconfigjson=pull-secret.json \
+  --type=kubernetes.io/dockerconfigjson \
+  -n dev-cluster-01
+
+# 4. Recreate SSH key
+oc create secret generic dev-cluster-01-ssh-key \
+  --from-file=ssh-privatekey=dev-cluster-01-ssh-key \
+  --from-file=ssh-publickey=dev-cluster-01-ssh-key.pub \
+  --type=kubernetes.io/ssh-auth \
+  -n dev-cluster-01
+
+# 5. Manually apply cluster resources if ArgoCD sync is problematic
+oc kustomize clusters/dev-cluster-01 | oc apply -f -
+```
+
+### Manual Intervention Workflow
+
+If ArgoCD sync is failing or causing namespace deletion loops:
+
+```bash
+# 1. Disable automated sync
+oc patch application <cluster-name> -n openshift-gitops \
+  --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+
+# 2. Cancel any running operations
+oc patch application <cluster-name> -n openshift-gitops \
+  --type merge -p '{"operation":null}'
+
+# 3. Ensure namespace exists
+oc create namespace <cluster-name>
+
+# 4. Create/verify secrets exist (see above)
+oc get secrets -n <cluster-name>
+
+# 5. Manually apply resources
+oc kustomize clusters/<cluster-name> | oc apply -f -
+
+# 6. Monitor provision pod
+oc get pods -n <cluster-name> -w
 ```
 
 ## Adding a New Cluster
@@ -344,11 +455,49 @@ Add custom manifests to be installed during cluster provisioning:
 # Check ClusterDeployment conditions
 oc get clusterdeployment <cluster-name> -n <namespace> -o yaml
 
-# View provision job logs
-oc logs -n <namespace> job/<cluster-name>-provision -f
+# View provision pod logs (not job)
+oc get pods -n <namespace> | grep provision
+oc logs -f <provision-pod-name> -n <namespace>
+
+# Check ClusterProvision status
+oc get clusterprovision -n <namespace>
+oc describe clusterprovision <provision-name> -n <namespace>
 
 # Check for AWS API errors
 oc describe clusterdeployment <cluster-name> -n <namespace>
+```
+
+### Common Provisioning Errors
+
+#### Error: "ssh: no key found" or "Invalid value: ssh-rsa AAAA...placeholder"
+
+**Cause**: Install-config contains placeholder SSH key or pullSecret instead of letting Hive inject them.
+
+**Solution**: Ensure install-config.yaml does NOT contain `sshKey` or `pullSecret` fields. Hive injects these automatically from ClusterDeployment secret references.
+
+#### Error: "ManagedCluster validation webhook denied: url "" is invalid"
+
+**Cause**: ManagedCluster has empty or invalid API server URL in `managedClusterClientConfigs`.
+
+**Solution**: Remove the `managedClusterClientConfigs` field from ManagedCluster spec. ACM will populate it automatically after cluster is provisioned.
+
+#### Error: "Hive controller panic: nil pointer dereference" in retrofitMetadataJSON
+
+**Cause**: ClusterDeployment has `clusterMetadata` fields (adminKubeconfigSecretRef, adminPasswordSecretRef, clusterID, infraID) set before provisioning.
+
+**Solution**: Remove `clusterMetadata` section from ClusterDeployment template. Hive populates these fields automatically during provisioning.
+
+#### Error: "ClusterImageSet not found"
+
+**Cause**: Referenced OpenShift version doesn't have a ClusterImageSet on the hub cluster.
+
+**Solution**:
+```bash
+# Check available versions
+oc get clusterimageset
+
+# Update cluster-config.yaml and kustomization.yaml with available version
+openshiftVersion: img4.20.10-x86-64-appsub
 ```
 
 ### ArgoCD sync failures
@@ -360,9 +509,40 @@ oc get application -n openshift-gitops
 # View Application events
 oc describe application <cluster-name> -n openshift-gitops
 
+# Check sync operation details
+oc get application <cluster-name> -n openshift-gitops -o jsonpath='{.status.operationState}'
+
 # Check ArgoCD logs
 oc logs -n openshift-gitops deployment/openshift-gitops-application-controller
 ```
+
+#### Error: "Application resource not permitted in project"
+
+**Cause**: ArgoCD project lacks permission for Application resources (needed for app-of-apps pattern).
+
+**Solution**: Add Application to namespaceResourceWhitelist in ArgoCD project:
+```yaml
+namespaceResourceWhitelist:
+  - group: argoproj.io
+    kind: Application
+```
+
+#### Error: "Hive/ACM resources not permitted in project"
+
+**Cause**: ArgoCD project doesn't allow Hive and ACM CRDs.
+
+**Solution**: Ensure bootstrap/argocd-project.yaml includes all required resource types in both `clusterResourceWhitelist` and `namespaceResourceWhitelist`.
+
+### Namespace Keeps Getting Deleted
+
+**Cause**: ArgoCD sync failures trigger namespace deletion/recreation cycles.
+
+**Solution**:
+1. Cancel the sync operation: `oc patch application <cluster-name> -n openshift-gitops --type merge -p '{"operation":null}'`
+2. Disable automated sync: `oc patch application <cluster-name> -n openshift-gitops --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'`
+3. Create namespace manually: `oc create namespace <cluster-name>`
+4. Recreate secrets (see "Secret Recreation" section above)
+5. Manually apply resources: `oc kustomize clusters/<cluster-name> | oc apply -f -`
 
 ### Cluster not importing to ACM
 
@@ -373,7 +553,10 @@ oc get managedcluster
 # Verify import secret
 oc get secret -n <cluster-name> <cluster-name>-import
 
-# Check ACM klusterlet status
+# Check ManagedCluster conditions
+oc get managedcluster <cluster-name> -o yaml
+
+# Check ACM klusterlet status on provisioned cluster
 export KUBECONFIG=<cluster-kubeconfig>
 oc get klusterlet -A
 ```
