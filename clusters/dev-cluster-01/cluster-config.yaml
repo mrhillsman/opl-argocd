@@ -6,7 +6,7 @@ metadata:
   namespace: dev-cluster-01
 data:
   clusterName: dev-cluster-01
-  baseDomain: dev.example.com
+  baseDomain: openshiftpartnerlabs.com
   region: us-east-1
   openshiftVersion: img4.20.10-x86-64-appsub
   environment: development

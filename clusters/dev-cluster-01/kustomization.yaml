@@ -32,7 +32,7 @@ patches:
         value: dev-cluster-01
       - op: replace
         path: /spec/baseDomain
-        value: dev.example.com
+        value: openshiftpartnerlabs.com
       - op: replace
         path: /spec/platform/aws/region
         value: us-east-1
@@ -113,6 +113,63 @@ patches:
       - op: replace
         path: /metadata/namespace
         value: dev-cluster-01
+      - op: replace
+        path: /stringData/install-config.yaml
+        value: |
+          apiVersion: v1
+          baseDomain: openshiftpartnerlabs.com
+          metadata:
+            name: dev-cluster-01
+
+          controlPlane:
+            name: master
+            platform:
+              aws:
+                type: m5.xlarge
+                rootVolume:
+                  iops: 4000
+                  size: 120
+                  type: gp3
+                zones:
+                  - us-east-1a
+                  - us-east-1b
+                  - us-east-1c
+            replicas: 3
+
+          compute:
+            - name: worker
+              platform:
+                aws:
+                  type: m5.2xlarge
+                  rootVolume:
+                    iops: 2000
+                    size: 100
+                    type: gp3
+                  zones:
+                    - us-east-1a
+                    - us-east-1b
+                    - us-east-1c
+              replicas: 3
+
+          networking:
+            clusterNetwork:
+              - cidr: 10.128.0.0/14
+                hostPrefix: 23
+            machineNetwork:
+              - cidr: 10.0.0.0/16
+            serviceNetwork:
+              - 172.30.0.0/16
+            networkType: OVNKubernetes
+
+          platform:
+            aws:
+              region: us-east-1
+
+          fips: false
+          publish: External
+          pullSecret: '{"auths":{"fake":{"auth":"aW52YWxpZAo="}}}'
+          sshKey: |
+            ssh-rsa AAAA...placeholder
 
 # Update all placeholder references
 replacements:
