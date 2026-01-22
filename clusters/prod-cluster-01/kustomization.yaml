@@ -9,14 +9,6 @@ resources:
 
 # Patches to customize the cluster
 patches:
-  # Update namespace references
-  - target:
-      kind: Namespace
-    patch: |-
-      - op: replace
-        path: /metadata/name
-        value: prod-cluster-01
-
   # Update ClusterDeployment with specific values
   - target:
       kind: ClusterDeployment
