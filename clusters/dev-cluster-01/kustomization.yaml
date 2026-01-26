@@ -59,7 +59,7 @@ patches:
         value: m5.2xlarge
       - op: replace
         path: /spec/replicas
-        value: 3
+        value: 0
 
   # Update ManagedCluster
   - target:
