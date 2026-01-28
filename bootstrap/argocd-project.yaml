@@ -2,7 +2,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
-  name: cluster-provisioning
+  name: mhillsma-cluster-provisioning
   namespace: openshift-gitops
   annotations:
     argocd.argoproj.io/sync-wave: "0"
