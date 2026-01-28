@@ -2,12 +2,12 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: dev-cluster-02
+  name: dev-cluster-01
   namespace: openshift-gitops
   annotations:
     argocd.argoproj.io/sync-wave: "10"
   labels:
-    cluster-name: dev-cluster-02
+    cluster-name: dev-cluster-01
     environment: development
   finalizers:
     - resources-finalizer.argocd.argoproj.io
@@ -17,11 +17,11 @@ spec:
   source:
     repoURL: https://github.com/yashoza19/opl-argocd.git
     targetRevision: master
-    path: clusters/dev-cluster-02
+    path: clusters/dev-cluster-01
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: dev-cluster-02
+    namespace: dev-cluster-01
 
   syncPolicy:
     automated:
