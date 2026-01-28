@@ -6,7 +6,7 @@ namespace: mhillsma-cluster
 resources:
   - ../../cluster-templates/aws-ha/base
   - cluster-config.yaml
-  - cluster-start-cronjob.yaml
+  #- cluster-start-cronjob.yaml
 
 # Patches to customize the cluster
 patches:
