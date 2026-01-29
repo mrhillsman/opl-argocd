@@ -12,13 +12,16 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "patch"]
+    verbs: ["get", "list", "patch", "update"]
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -39,12 +42,13 @@ metadata:
   name: deprovision-cleanup
   namespace: openshift-gitops
 spec:
-  schedule: "*/2 * * * *"  # Every 2 minutes
+  schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
   jobTemplate:
     spec:
+      activeDeadlineSeconds: 300
       backoffLimit: 0
       template:
         spec:
@@ -52,73 +56,106 @@ spec:
           restartPolicy: Never
           containers:
             - name: cleanup
-              image: registry.redhat.io/openshift4/ose-cli:latest
+              image: registry.redhat.io/openshift4/ose-cli:v4.20
               env:
                 - name: FINALIZER
                   value: "openshiftpartnerlabs.com/deprovision"
+                - name: DEPROVISION_LABEL
+                  value: "openshiftpartnerlabs.com/deprovision-pending"
               command:
                 - /bin/bash
                 - -c
                 - |
                   set -e
 
-                  echo "=== Deprovision Cleanup Job - $(date) ==="
+                  echo "=== Deprovision Cleanup - $(date) ==="
                   echo ""
 
-                  # Find all secrets with our finalizer across all namespaces
-                  SECRETS_WITH_FINALIZER=$(oc get secrets -A -o json | \
-                    jq -r ".items[] | select(.metadata.finalizers[]? == \"$FINALIZER\") | \"\(.metadata.namespace)/\(.metadata.name)\"" 2>/dev/null || echo "")
+                  # Hybrid approach: Query labeled secrets (fast) + fallback for unlabeled (transition)
+                  LABELED_SECRETS=$(oc get secrets -A -l "$DEPROVISION_LABEL=true" \
+                    -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' \
+                    2>/dev/null | grep -v '^$' || echo "")
 
-                  if [[ -z "$SECRETS_WITH_FINALIZER" ]]; then
-                    echo "No secrets found with finalizer $FINALIZER"
+                  # Fallback: Find secrets with finalizer but no label (legacy)
+                  FINALIZER_SECRETS=$(oc get secrets -A -o json 2>/dev/null | \
+                    jq -r ".items[] | select(.metadata.finalizers[]? == \"$FINALIZER\") | select(.metadata.labels[\"$DEPROVISION_LABEL\"] != \"true\") | \"\(.metadata.namespace)/\(.metadata.name)\"" \
+                    2>/dev/null || echo "")
+
+                  # Combine both lists, remove duplicates
+                  SECRETS=$(echo -e "$LABELED_SECRETS\n$FINALIZER_SECRETS" | grep -v '^$' | sort -u || echo "")
+
+                  if [[ -z "$SECRETS" ]]; then
+                    echo "No secrets pending cleanup"
                     exit 0
                   fi
 
-                  echo "Found secrets with finalizer:"
-                  echo "$SECRETS_WITH_FINALIZER"
+                  echo "Found secrets pending cleanup:"
+                  echo "$SECRETS"
                   echo ""
 
-                  for secret_ref in $SECRETS_WITH_FINALIZER; do
+                  CLEANED=0
+                  FAILED=0
+                  PENDING=0
+
+                  while IFS= read -r secret_ref; do
+                    [[ -z "$secret_ref" ]] && continue
+
                     NAMESPACE=$(echo "$secret_ref" | cut -d'/' -f1)
                     SECRET_NAME=$(echo "$secret_ref" | cut -d'/' -f2)
-
-                    echo "Processing: $NAMESPACE/$SECRET_NAME"
-
-                    # Derive cluster name from namespace (assumes namespace = cluster name)
                     CLUSTER_NAME="$NAMESPACE"
                     UNINSTALL_JOB="${CLUSTER_NAME}-uninstall"
 
-                    # Check if uninstall job exists and has completed
-                    JOB_STATUS=$(oc get job "$UNINSTALL_JOB" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+                    echo "Processing: $NAMESPACE/$SECRET_NAME"
 
-                    if [[ "$JOB_STATUS" == "True" ]]; then
-                      echo "  Uninstall job $UNINSTALL_JOB completed successfully"
-                      echo "  Removing finalizer from $SECRET_NAME..."
+                    # Check uninstall job status
+                    JOB_COMPLETE=$(oc get job "$UNINSTALL_JOB" -n "$NAMESPACE" \
+                      -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+                    JOB_FAILED=$(oc get job "$UNINSTALL_JOB" -n "$NAMESPACE" \
+                      -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
 
-                      # Get the index of our finalizer
+                    if [[ "$JOB_COMPLETE" == "True" ]]; then
+                      echo "  Uninstall completed - removing finalizer"
+
+                      # Remove finalizer
                       INDEX=$(oc get secret "$SECRET_NAME" -n "$NAMESPACE" -o json | \
-                        jq -r ".metadata.finalizers | to_entries | .[] | select(.value==\"$FINALIZER\") | .key" 2>/dev/null || echo "")
+                        jq -r ".metadata.finalizers | to_entries | .[] | select(.value==\"$FINALIZER\") | .key" \
+                        2>/dev/null || echo "")
 
                       if [[ -n "$INDEX" ]]; then
                         oc patch secret "$SECRET_NAME" -n "$NAMESPACE" --type=json \
                           -p="[{\"op\": \"remove\", \"path\": \"/metadata/finalizers/$INDEX\"}]"
-                        echo "  Finalizer removed from $SECRET_NAME"
-                      else
-                        echo "  Finalizer not found (may have been removed already)"
                       fi
+
+                      # Remove tracking label
+                      oc label secret "$SECRET_NAME" -n "$NAMESPACE" "$DEPROVISION_LABEL-" 2>/dev/null || true
+
+                      echo "  Cleaned up"
+                      ((CLEANED++)) || true
+
+                    elif [[ "$JOB_FAILED" == "True" ]]; then
+                      echo "  WARNING: Uninstall FAILED - manual intervention required"
+
+                      # Create an event for visibility
+                      oc create event "deprovision-failed-$CLUSTER_NAME" \
+                        --namespace="$NAMESPACE" \
+                        --type=Warning \
+                        --reason=DeprovisionFailed \
+                        --message="Uninstall job $UNINSTALL_JOB failed. Manual cleanup required." \
+                        2>/dev/null || true
+
+                      ((FAILED++)) || true
+
                     else
-                      # Check if job failed
-                      JOB_FAILED=$(oc get job "$UNINSTALL_JOB" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
-                      if [[ "$JOB_FAILED" == "True" ]]; then
-                        echo "  WARNING: Uninstall job $UNINSTALL_JOB FAILED - manual intervention required"
-                      elif oc get job "$UNINSTALL_JOB" -n "$NAMESPACE" &>/dev/null; then
-                        echo "  Uninstall job $UNINSTALL_JOB still running, skipping..."
-                      else
-                        echo "  Uninstall job $UNINSTALL_JOB not found yet, skipping..."
-                      fi
+                      echo "  Uninstall still in progress or not started"
+                      ((PENDING++)) || true
                     fi
 
                     echo ""
-                  done
+                  done <<< "$SECRETS"
 
-                  echo "=== Cleanup job completed ==="
+                  echo "=== Summary ==="
+                  echo "Cleaned: $CLEANED"
+                  echo "Failed (need attention): $FAILED"
+                  echo "Pending: $PENDING"
+                  echo ""
+                  echo "=== Done ==="

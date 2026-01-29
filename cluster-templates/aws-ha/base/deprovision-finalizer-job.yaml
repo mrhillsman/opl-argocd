@@ -1,0 +1,120 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deprovision-finalizer-sa
+  annotations:
+    argocd.argoproj.io/hook: PreDelete
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deprovision-finalizer-role
+  annotations:
+    argocd.argoproj.io/hook: PreDelete
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deprovision-finalizer-binding
+  annotations:
+    argocd.argoproj.io/hook: PreDelete
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+subjects:
+  - kind: ServiceAccount
+    name: deprovision-finalizer-sa
+roleRef:
+  kind: Role
+  name: deprovision-finalizer-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: add-deprovision-finalizers
+  annotations:
+    argocd.argoproj.io/hook: PreDelete
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 2
+  template:
+    spec:
+      serviceAccountName: deprovision-finalizer-sa
+      restartPolicy: Never
+      containers:
+        - name: add-finalizers
+          image: registry.redhat.io/openshift4/ose-cli:v4.14
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FINALIZER
+              value: "openshiftpartnerlabs.com/deprovision"
+            - name: DEPROVISION_LABEL
+              value: "openshiftpartnerlabs.com/deprovision-pending"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              # Derive cluster name from namespace
+              CLUSTER_NAME="$NAMESPACE"
+
+              # Secrets to protect (can be extended)
+              SECRETS=("aws-credentials" "${CLUSTER_NAME}-metadata-json")
+
+              echo "=== Adding deprovision finalizers ==="
+              echo "Namespace: $NAMESPACE"
+              echo "Cluster: $CLUSTER_NAME"
+              echo ""
+
+              for secret in "${SECRETS[@]}"; do
+                echo "Processing secret: $secret"
+
+                if ! oc get secret "$secret" -n "$NAMESPACE" &>/dev/null; then
+                  echo "  Secret not found, skipping"
+                  continue
+                fi
+
+                # Check if finalizer already exists
+                existing=$(oc get secret "$secret" -n "$NAMESPACE" \
+                  -o jsonpath='{.metadata.finalizers}' 2>/dev/null || echo "")
+
+                if [[ "$existing" == *"$FINALIZER"* ]]; then
+                  echo "  Finalizer already exists"
+                  continue
+                fi
+
+                # Add finalizer
+                echo "  Adding finalizer..."
+                if [[ -z "$existing" || "$existing" == "null" ]]; then
+                  oc patch secret "$secret" -n "$NAMESPACE" --type=json \
+                    -p="[{\"op\": \"add\", \"path\": \"/metadata/finalizers\", \"value\": [\"$FINALIZER\"]}]"
+                else
+                  oc patch secret "$secret" -n "$NAMESPACE" --type=json \
+                    -p="[{\"op\": \"add\", \"path\": \"/metadata/finalizers/-\", \"value\": \"$FINALIZER\"}]"
+                fi
+
+                # Add label for efficient CronJob querying
+                echo "  Adding tracking label..."
+                oc label secret "$secret" -n "$NAMESPACE" \
+                  "$DEPROVISION_LABEL=true" --overwrite
+
+                echo "  Done"
+              done
+
+              echo ""
+              echo "=== Finalizer setup complete ==="

@@ -6,6 +6,7 @@ resources:
   - machinepool-worker.yaml
   - managedcluster.yaml
   - install-config-secret.yaml
+  - deprovision-finalizer-job.yaml
 
 # Common labels applied to all resources
 commonLabels:
