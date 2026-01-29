@@ -46,7 +46,7 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: HookSucceeded
     argocd.argoproj.io/sync-wave: "1"
 spec:
-  activeDeadlineSeconds: 300
+  activeDeadlineSeconds: 3600
   backoffLimit: 2
   template:
     spec:
@@ -73,13 +73,35 @@ spec:
               set -e
 
               CLUSTER_NAME="$NAMESPACE"
+              METADATA_SECRET="${CLUSTER_NAME}-metadata-json"
               SECRETS=("aws-credentials" "${CLUSTER_NAME}-metadata-json")
+              POLL_INTERVAL=30
+              MAX_WAIT=3600
 
               echo "=== Adding deprovision finalizers ==="
               echo "Namespace: $NAMESPACE"
               echo "Cluster: $CLUSTER_NAME"
               echo ""
 
+              # Wait for metadata-json secret to exist
+              echo "Waiting for $METADATA_SECRET to exist..."
+              ELAPSED=0
+              while [ $ELAPSED -lt $MAX_WAIT ]; do
+                if oc get secret "$METADATA_SECRET" -n "$NAMESPACE" &>/dev/null; then
+                  echo "Secret $METADATA_SECRET found!"
+                  break
+                fi
+                echo "  Still waiting... ($ELAPSED seconds elapsed)"
+                sleep $POLL_INTERVAL
+                ELAPSED=$((ELAPSED + POLL_INTERVAL))
+              done
+
+              if [ $ELAPSED -ge $MAX_WAIT ]; then
+                echo "ERROR: Timeout waiting for $METADATA_SECRET"
+                exit 1
+              fi
+
+              # Add finalizers to both secrets
               for secret in "${SECRETS[@]}"; do
                 echo "Processing secret: $secret"
 
