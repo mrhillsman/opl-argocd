@@ -56,7 +56,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: cleanup
-              image: registry.redhat.io/openshift4/ose-cli:v4.20
+              image: registry.redhat.io/openshift4/ose-cli-rhel9:latest
               env:
                 - name: FINALIZER
                   value: "openshiftpartnerlabs.com/deprovision"
