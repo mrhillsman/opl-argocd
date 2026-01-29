@@ -40,7 +40,7 @@ spec:
     name: pull-secret
 
   # Preserve cluster on delete - set to false so clusters are cleaned up when deleted from Git
-  preserveOnDelete: false
+  # preserveOnDelete: false
 
   # Power state
   powerState: Running
